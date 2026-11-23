@@ -3,6 +3,7 @@ import { DimensionValue, StyleSheet, Text, View, Pressable, Modal, Image, useWin
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useGameSession } from "../hooks/useGameSession";
+import { DirectionPad } from "../components/ui/DirectionPad";
 import { GridBoard } from "../components/grid/GridBoard";
 import { ScoreBoard } from "../components/ui/ScoreBoard";
 import { ResourceBar } from "../components/ui/ResourceBar";
@@ -200,6 +201,12 @@ export default function GameScreen() {
     turn,
     lastBotMoves,
     players,
+    selectedBoxId,
+    setSelectedBoxId,
+    selectedDirection,
+    setSelectedDirection,
+    feedbackMessage,
+    handleExpandBlock,
     selectedPower,
     targetingMode,
     powerMessage,
@@ -623,25 +630,10 @@ export default function GameScreen() {
             tapsRemaining={turn.tapsRemaining}
             tapsPerTurn={turn.tapsPerTurn}
             totalBoxes={totalBoxes}
-            powerMessage={powerMessage}
+            powerMessage={feedbackMessage || powerMessage}
             player1ColorHex={player1ColorHex}
             player2ColorHex={player2ColorHex}
             density={layoutDensity}
-          />
-
-          <ResourceBar
-            resources={activePlayerState.resources}
-            alwaysShow={level.showResources}
-          />
-
-          <PowerBar
-            powers={activePlayerState.powers}
-            selectedPower={selectedPower}
-            targetingMode={targetingMode}
-            onActivatePower={activatePower}
-            onCancelTargeting={cancelPowerTargeting}
-            disabled={isInteractionDisabled}
-            alwaysShowHint={level.showPowers}
           />
         </View>
 
@@ -655,6 +647,9 @@ export default function GameScreen() {
             board={board}
             onTileTap={handleTileTap}
             onTileLongPress={handleTileLongPress}
+            onExpandDirection={handleExpandBlock}
+            selectedBoxId={selectedBoxId}
+            onSelectBox={setSelectedBoxId}
             disabled={isInteractionDisabled && !targetingMode}
             lastBotMoves={lastBotMoves}
             activePlayer={activePlayer}
@@ -668,6 +663,20 @@ export default function GameScreen() {
             layoutDensity={layoutDensity}
           />
         </View>
+
+        <DirectionPad
+          board={board}
+          activePlayer={activePlayer}
+          selectedBoxId={selectedBoxId}
+          selectedDirection={selectedDirection}
+          onSelectDirection={setSelectedDirection}
+          onExpandDirection={handleExpandBlock}
+          onDeselect={() => {
+            setSelectedBoxId(null);
+            setSelectedDirection(null);
+          }}
+          disabled={isInteractionDisabled}
+        />
 
         <View
           style={[

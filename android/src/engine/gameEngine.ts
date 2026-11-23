@@ -10,5 +10,23 @@ export {
   makeBoxDef,
   fillGridWithSingles,
 } from "./board/boardFactory";
+export {
+  canPlayerSpawnAt,
+  getRowTerritoryZone,
+  isCellInNeutralZone,
+  updateTerritoryUnlocks,
+  getMidlineRow,
+} from "./board/territoryRules";
+export type { TerritoryZone } from "./board/territoryRules";
+export {
+  canExpandBlock,
+  executeSpawnBlock,
+  executeExpandBlock,
+  getValidDirectionsForBlock,
+  getExtrusionStripCells,
+  getAllLegalMoves,
+  hasAnyLegalMoveForPlayer,
+} from "./board/blockEngine";
+export type { LegalMove } from "./board/blockEngine";
 export { getBotMoveForLevel, getBotActionForLevel } from "./ai/aiEngine";
 export type { BotAction } from "./ai/aiEngine";

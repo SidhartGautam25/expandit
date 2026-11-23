@@ -132,6 +132,9 @@ export function createMoveContext(
   };
 }
 
+import { canPlayerSpawnAt } from "../board/territoryRules";
+import { hasAnyLegalMoveForPlayer } from "../board/blockEngine";
+
 /** Shared turn snapshot for player + bot move validation. */
 export interface TurnRuleState {
   tapsRemaining: number;
@@ -144,7 +147,7 @@ export interface TurnRuleState {
 
 /**
  * Single gate for tap moves — used by UI, session execution, and bot AI.
- * Covers affordance (incl. frozen = 2 taps), danger-plot limits, and same-box reuse.
+ * Covers spawning on valid cells and selecting/interacting with own blocks.
  */
 export function isValidTapAction(
   board: GameBoard,
@@ -153,7 +156,18 @@ export function isValidTapAction(
   player: Player,
   turn: TurnRuleState
 ): boolean {
-  return isValidTapTarget(board, row, col, createMoveContext(player, turn));
+  if (turn.tapsRemaining <= 0) return false;
+  if (row < 0 || row >= board.rows || col < 0 || col >= board.cols) return false;
+
+  const boxId = board.cellMap[row]?.[col];
+  if (!boxId) {
+    // Empty cell: check if spawn is valid
+    return canPlayerSpawnAt(board, row, col, player);
+  }
+
+  // Occupied cell: valid if owned by the active player
+  const box = board.boxes[boxId];
+  return box?.owner === player;
 }
 
 /**
@@ -177,15 +191,18 @@ export function getValidMoves(board: GameBoard, ctx: MoveContext): ValidMove[] {
   const seen = new Set<string>();
   const moves: ValidMove[] = [];
 
-  for (const list of [
-    collectNeutralMoves(board, ctx),
-    collectMaturedOrphanMoves(board, ctx),
-    collectSelfAttackMoves(board, ctx),
-  ]) {
-    for (const move of list) {
-      if (seen.has(move.boxId)) continue;
-      seen.add(move.boxId);
-      moves.push(move);
+  for (let r = 0; r < board.rows; r++) {
+    for (let c = 0; c < board.cols; c++) {
+      if (canPlayerSpawnAt(board, r, c, ctx.activePlayer)) {
+        moves.push({ row: r, col: c, boxId: `empty-${r}-${c}` });
+      }
+    }
+  }
+
+  for (const box of Object.values(board.boxes)) {
+    if (box.owner === ctx.activePlayer && !seen.has(box.id)) {
+      seen.add(box.id);
+      moves.push({ row: box.anchor.row, col: box.anchor.col, boxId: box.id });
     }
   }
 
@@ -205,20 +222,7 @@ export function hasAnyLegalMove(
   }
 ): boolean {
   if (turn.tapsRemaining <= 0) return false;
-
-  const ctx = createMoveContext(player, turn);
-  if (getValidMoves(board, ctx).length > 0) return true;
-
-  if (!canInitiateFreezeTurn(turn)) return false;
-
-  const seen = new Set<string>();
-  for (const box of Object.values(board.boxes)) {
-    if (seen.has(box.id)) continue;
-    if (canFreezeBox(board, box.anchor.row, box.anchor.col, player)) return true;
-    seen.add(box.id);
-  }
-
-  return false;
+  return hasAnyLegalMoveForPlayer(board, player);
 }
 
 /** True when the player has used at least one tap but still has taps left this turn. */

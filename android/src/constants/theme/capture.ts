@@ -5,8 +5,8 @@ import { lightenColor } from "./utils";
 
 /** Fixed in-game capture colors for player territory */
 export const PLAYER_CAPTURE_COLORS = {
-  player1: palette.white,
-  player2: palette.black,
+  player1: "#2563EB",
+  player2: "#EA580C",
 } as const;
 
 export const RESERVED_CAPTURE_COLORS = [

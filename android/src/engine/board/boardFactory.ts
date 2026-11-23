@@ -31,29 +31,23 @@ function createBoxFromDefinition(def: BoxDefinition): GameBox {
 
 export function createBoardFromLevel(
   level: CampaignLevel,
-  options?: { reservedColors?: string[] }
+  _options?: { reservedColors?: string[] }
 ): GameBoard {
-  const cellMap: (string | null)[][] = Array.from({ length: level.rows }, () =>
-    Array(level.cols).fill(null)
+  // Ensure an even number of rows for clean horizontal midline split
+  const rawRows = level.rows && level.rows >= 4 ? level.rows : 8;
+  const rows = rawRows % 2 === 0 ? rawRows : rawRows + 1;
+  const cols = level.cols && level.cols >= 4 ? level.cols : 8;
+
+  const cellMap: (string | null)[][] = Array.from({ length: rows }, () =>
+    Array(cols).fill(null)
   );
   const boxes: Record<string, GameBox> = {};
 
-  for (const def of level.boxes) {
-    const box = createBoxFromDefinition(def);
-    boxes[box.id] = box;
-    for (const cell of box.cells) {
-      if (cell.row >= 0 && cell.row < level.rows && cell.col >= 0 && cell.col < level.cols) {
-        cellMap[cell.row][cell.col] = box.id;
-      }
-    }
-  }
+  const midline = Math.floor(rows / 2);
+  const unlockedP1MaxRow = midline - 1;
+  const unlockedP2MinRow = midline;
 
-  assignBoxColors(
-    { rows: level.rows, cols: level.cols, cellMap, boxes },
-    options?.reservedColors ?? []
-  );
-
-  return { rows: level.rows, cols: level.cols, cellMap, boxes };
+  return { rows, cols, cellMap, boxes, unlockedP1MaxRow, unlockedP2MinRow };
 }
 
 /** Helper to place a box at an anchor using a shape template */
@@ -101,7 +95,14 @@ export function cloneBoard(board: GameBoard): GameBoard {
       baseColor: box.baseColor,
     };
   }
-  return { rows: board.rows, cols: board.cols, cellMap, boxes };
+  return {
+    rows: board.rows,
+    cols: board.cols,
+    cellMap,
+    boxes,
+    unlockedP1MaxRow: board.unlockedP1MaxRow,
+    unlockedP2MinRow: board.unlockedP2MinRow,
+  };
 }
 
 export function getBoxAt(

@@ -112,12 +112,12 @@ export function ScoreBoard({
   } else if (powerMessage) {
     statusText = powerMessage;
   } else if (activePlayer === 1) {
-    const tapWord = tapsRemaining === 1 ? "tap" : "taps";
+    const tapWord = tapsRemaining === 1 ? "action" : "actions";
     statusText = isBotMode
       ? `Your turn · ${tapsRemaining} ${tapWord} left`
       : `Player 1 turn · ${tapsRemaining} ${tapWord} left`;
   } else {
-    const tapWord = tapsRemaining === 1 ? "tap" : "taps";
+    const tapWord = tapsRemaining === 1 ? "action" : "actions";
     statusText = isBotMode
       ? `Bot turn · ${tapsRemaining} ${tapWord} left`
       : `Player 2 turn · ${tapsRemaining} ${tapWord} left`;

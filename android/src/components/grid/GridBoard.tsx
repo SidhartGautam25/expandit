@@ -1,27 +1,27 @@
-import React, { useMemo } from "react";
-import { StyleSheet, View, Pressable, useWindowDimensions } from "react-native";
+import React, { useMemo, useRef } from "react";
+import { StyleSheet, View, Pressable, useWindowDimensions, PanResponder } from "react-native";
 import { GameBoard } from "../../types/board";
 import { Player } from "../../types/game";
-import { Coord } from "../../types/box";
+import { Coord, Direction } from "../../types/box";
 import { TurnState } from "../../types/session";
 import {
   fitBoardLayout,
   getBoardContentSize,
   getBoardMetrics,
-  getCellFillLayout,
 } from "../../engine/board/boardLayout";
-import { createMoveContext, getValidMoves, canFreezeBox, canInitiateFreezeTurn } from "../../engine/gameEngine";
-import { BoxShapeLayer } from "./BoxShapeLayer";
+import { TerritoryBoardLayer } from "./TerritoryBoardLayer";
 import { GAME_SCENE } from "../../constants/theme";
 import type { GameLayoutDensity } from "../../utils/gameLayoutDensity";
-import { getLastMoveBoxIds } from "../../utils/lastMove";
 
 const INNER_BORDER = 1;
 
 interface GridBoardProps {
   board: GameBoard;
   onTileTap: (row: number, col: number) => void;
-  onTileLongPress: (row: number, col: number) => void;
+  onTileLongPress?: (row: number, col: number) => void;
+  onExpandDirection?: (boxId: string, dir: Direction) => void;
+  selectedBoxId?: string | null;
+  onSelectBox?: (boxId: string | null) => void;
   disabled: boolean;
   lastBotMoves: Coord[];
   activePlayer: Player;
@@ -31,7 +31,6 @@ interface GridBoardProps {
   gameMode?: "bot" | "pvp";
   player1ColorHex?: string;
   player2ColorHex?: string;
-  /** Measured height of the flex board area from the game screen */
   availableHeight?: number;
   layoutDensity?: GameLayoutDensity;
 }
@@ -39,14 +38,11 @@ interface GridBoardProps {
 export function GridBoard({
   board,
   onTileTap,
-  onTileLongPress,
+  onExpandDirection,
+  selectedBoxId = null,
+  onSelectBox,
   disabled,
-  lastBotMoves,
   activePlayer,
-  turn,
-  targetingMode = false,
-  excludedBoxId = null,
-  gameMode = "bot",
   player1ColorHex,
   player2ColorHex,
   availableHeight,
@@ -133,30 +129,47 @@ export function GridBoard({
   const boardWidth = contentWidth + INNER_BORDER * 2;
   const boardHeight = contentHeight + INNER_BORDER * 2;
 
-  const lastMoveBoxIds = useMemo(() => {
-    if (gameMode === "bot" && activePlayer !== 1) return new Set<string>();
-    return getLastMoveBoxIds(board, lastBotMoves);
-  }, [lastBotMoves, board, activePlayer, gameMode]);
+  // Touch tracking for tap vs swipe
+  const touchStartRef = useRef<{ x: number; y: number; row: number; col: number } | null>(null);
 
-  const validBoxIds = useMemo(() => {
-    const ctx = createMoveContext(activePlayer, turn);
-    return new Set(getValidMoves(board, ctx).map((m) => m.boxId));
-  }, [board, activePlayer, turn]);
+  const handleCellTouchStart = (row: number, col: number, e: any) => {
+    const nativeEvent = e.nativeEvent;
+    touchStartRef.current = {
+      x: nativeEvent.pageX,
+      y: nativeEvent.pageY,
+      row,
+      col,
+    };
+  };
 
-  const canFreezeThisTurn = canInitiateFreezeTurn(turn);
+  const handleCellTouchEnd = (row: number, col: number, e: any) => {
+    if (disabled || !touchStartRef.current) return;
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
 
-  const interactiveBoxIds = useMemo(() => {
-    const ids = new Set(validBoxIds);
-    if (!canFreezeThisTurn) return ids;
-    for (const box of Object.values(board.boxes)) {
-      if (canFreezeBox(board, box.anchor.row, box.anchor.col, activePlayer)) {
-        ids.add(box.id);
+    const nativeEvent = e.nativeEvent;
+    const dx = nativeEvent.pageX - start.x;
+    const dy = nativeEvent.pageY - start.y;
+    const distSq = dx * dx + dy * dy;
+
+    const boxId = board.cellMap[row]?.[col];
+    const box = boxId ? board.boxes[boxId] : null;
+
+    // Check if it's a swipe on an owned block
+    if (box && box.owner === activePlayer && distSq > 400) {
+      let swipeDir: Direction;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        swipeDir = dx > 0 ? "right" : "left";
+      } else {
+        swipeDir = dy > 0 ? "down" : "up";
       }
+      onExpandDirection?.(box.id, swipeDir);
+      return;
     }
-    return ids;
-  }, [board, validBoxIds, activePlayer, canFreezeThisTurn]);
 
-  const boxes = useMemo(() => Object.values(board.boxes), [board.boxes]);
+    // Otherwise, normal tap
+    onTileTap(row, col);
+  };
 
   return (
     <View style={[styles.boardFrame, { padding: framePadding }]}>
@@ -172,61 +185,46 @@ export function GridBoard({
             { width: contentWidth, height: contentHeight },
           ]}
         >
-          <BoxShapeLayer
+          {/* Main Visual Board Layer */}
+          <TerritoryBoardLayer
             board={board}
             metrics={metrics}
-            lastBotBoxIds={lastMoveBoxIds}
+            activePlayer={activePlayer}
+            selectedBoxId={selectedBoxId}
+            onSelectBox={(boxId) => onSelectBox?.(boxId)}
+            onExpandDirection={onExpandDirection}
             player1ColorHex={player1ColorHex}
             player2ColorHex={player2ColorHex}
+            disabled={disabled}
           />
 
-          {boxes.flatMap((box) => {
-            if (!interactiveBoxIds.has(box.id)) return [];
+          {/* Interactive Tap & Swipe Grid Layer */}
+          {Array.from({ length: board.rows }).map((_, r) =>
+            Array.from({ length: board.cols }).map((_, c) => {
+              const left = metrics.boardPadding + c * (metrics.cellSize + metrics.gridGap);
+              const top = metrics.boardPadding + r * (metrics.cellSize + metrics.gridGap);
 
-            const canTap = validBoxIds.has(box.id);
-            const canLongPressFreeze =
-              canFreezeThisTurn &&
-              canFreezeBox(board, box.anchor.row, box.anchor.col, activePlayer);
-
-            const isExcluded =
-              excludedBoxId !== null && box.id === excludedBoxId && !targetingMode;
-
-            return box.cells.map((cell) => {
-              const layout = getCellFillLayout(board, box, cell, metrics);
               return (
                 <Pressable
-                  key={`tap-${box.id}-${cell.row}-${cell.col}`}
+                  key={`tap-cell-${r}-${c}`}
+                  onTouchStart={(e) => handleCellTouchStart(r, c, e)}
+                  onTouchEnd={(e) => handleCellTouchEnd(r, c, e)}
                   style={[
                     styles.tapCell,
                     {
-                      left: layout.left,
-                      top: layout.top,
-                      width: layout.width,
-                      height: layout.height,
-                      zIndex: 10,
+                      left,
+                      top,
+                      width: metrics.cellSize,
+                      height: metrics.cellSize,
+                      zIndex: 15,
                     },
                   ]}
-                  delayLongPress={450}
-                  onPress={
-                    canTap
-                      ? () => onTileTap(cell.row, cell.col)
-                      : undefined
-                  }
-                  onLongPress={
-                    canLongPressFreeze
-                      ? () => onTileLongPress(cell.row, cell.col)
-                      : undefined
-                  }
-                  disabled={
-                    disabled ||
-                    (isExcluded && !canLongPressFreeze) ||
-                    (!canTap && !canLongPressFreeze)
-                  }
-                  hitSlop={4}
+                  disabled={disabled}
+                  hitSlop={2}
                 />
               );
-            });
-          })}
+            })
+          )}
         </View>
       </View>
     </View>

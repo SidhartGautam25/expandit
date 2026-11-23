@@ -10,7 +10,10 @@ export type BoxShapeType =
   | "l-shape"
   | "zigzag"
   | "square"
-  | "block3x2";
+  | "block3x2"
+  | "rectangle";
+
+export type Direction = "up" | "down" | "left" | "right";
 
 export interface Coord {
   row: number;
@@ -41,6 +44,12 @@ export interface GameBox {
   rewards?: ResourceBundle;
   powerGrants?: PowerGrant[];
   baseColor: string;
+  // Rectangular extrusion block properties:
+  row: number;
+  col: number;
+  width: number;
+  height: number;
+  player: Player;
 }
 
 export function getCaptureThreshold(size: number): number {

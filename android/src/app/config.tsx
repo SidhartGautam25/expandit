@@ -35,45 +35,34 @@ function BoardPreview({ level, size = 80 }: { level: CampaignLevel; size?: numbe
       }}
     >
       <View style={{ width: boardWidth, height: boardHeight, position: "relative" }}>
-        {Object.values(board.boxes).map((box) => {
-          return box.cells.map((cell) => {
-            const hasTopNeighbor = box.cells.some((c) => c.row === cell.row - 1 && c.col === cell.col);
-            const hasBottomNeighbor = box.cells.some((c) => c.row === cell.row + 1 && c.col === cell.col);
-            const hasLeftNeighbor = box.cells.some((c) => c.row === cell.row && c.col === cell.col - 1);
-            const hasRightNeighbor = box.cells.some((c) => c.row === cell.row && c.col === cell.col + 1);
-
-            const gap = 1.2;
-            const left = cell.col * cellSize + (hasLeftNeighbor ? 0 : gap);
-            const top = cell.row * cellSize + (hasTopNeighbor ? 0 : gap);
-            const width = cellSize - (hasLeftNeighbor ? 0 : gap) - (hasRightNeighbor ? 0 : gap);
-            const height = cellSize - (hasTopNeighbor ? 0 : gap) - (hasBottomNeighbor ? 0 : gap);
-
-            // Border radius matching only outer corners of the box shape
-            const r = 2.5;
-            const borderTopLeftRadius = hasTopNeighbor || hasLeftNeighbor ? 0 : r;
-            const borderTopRightRadius = hasTopNeighbor || hasRightNeighbor ? 0 : r;
-            const borderBottomLeftRadius = hasBottomNeighbor || hasLeftNeighbor ? 0 : r;
-            const borderBottomRightRadius = hasBottomNeighbor || hasRightNeighbor ? 0 : r;
-
-            return (
-              <View
-                key={`${box.id}-${cell.row}-${cell.col}`}
-                style={{
-                  position: "absolute",
-                  left,
-                  top,
-                  width,
-                  height,
-                  backgroundColor: box.baseColor,
-                  borderTopLeftRadius,
-                  borderTopRightRadius,
-                  borderBottomLeftRadius,
-                  borderBottomRightRadius,
-                }}
-              />
-            );
-          });
+        {Array.from({ length: board.rows }).map((_, r) => {
+          const isTopHalf = r < Math.floor(board.rows / 2);
+          return Array.from({ length: board.cols }).map((_, c) => (
+            <View
+              key={`cell-${r}-${c}`}
+              style={{
+                position: "absolute",
+                left: c * cellSize,
+                top: r * cellSize,
+                width: cellSize - 1,
+                height: cellSize - 1,
+                backgroundColor: isTopHalf ? "#EFF6FF" : "#FFF7ED",
+                borderColor: isTopHalf ? "rgba(59, 130, 246, 0.2)" : "rgba(234, 88, 12, 0.2)",
+                borderWidth: 0.5,
+              }}
+            />
+          ));
         })}
+        <View
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: Math.floor(board.rows / 2) * cellSize - 1,
+            height: 2,
+            backgroundColor: "#FACC15",
+          }}
+        />
       </View>
     </View>
   );
@@ -204,7 +193,7 @@ export default function ConfigScreen() {
                   config.player1Color === "white" && styles.modeButtonTextSelected,
                 ]}
               >
-                ⚪ WHITE
+                🔵 BLUE
               </Text>
             </Pressable>
             <Pressable
@@ -220,7 +209,7 @@ export default function ConfigScreen() {
                   config.player1Color === "black" && styles.modeButtonTextSelected,
                 ]}
               >
-                ⚫ BLACK
+                🟠 ORANGE
               </Text>
             </Pressable>
           </View>

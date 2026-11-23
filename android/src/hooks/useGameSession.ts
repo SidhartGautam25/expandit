@@ -1,31 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { GameBoard, getTotalBoardPoints } from "../types/board";
 import { Player, GameStatus } from "../types/game";
-import { Coord, isDangerPlot } from "../types/box";
+import { Coord, Direction } from "../types/box";
 import { TurnState, PlayerState, SessionSnapshot } from "../types/session";
 import { PowerId } from "../types/powers";
 import { CampaignLevel } from "../types/level";
 import {
   createBoardFromLevel,
-  executeTap,
-  executeFreeze,
-  canFreezeBox,
-  canInitiateFreezeTurn,
-  FREEZE_TAP_COST,
-  getTapCostForBox,
   checkWinCondition,
+  computeScores,
   getBoxAt,
-  createMoveContext,
   hasAnyLegalMove,
+  canPlayerSpawnAt,
+  canExpandBlock,
+  executeSpawnBlock,
+  executeExpandBlock,
+  getBotActionForLevel,
 } from "../engine/gameEngine";
-import { isValidTapAction, isValidFreezeTarget } from "../engine/rules/moveRules";
-import { isAdjacentToPlayerTerritory } from "../engine/board/boundary";
-import { applyCaptureRewards, createInitialPlayerState } from "../engine/rewards/rewardEngine";
-import { executePower, getPowerDefinition } from "../registries/powerRegistry";
+import { createInitialPlayerState } from "../engine/rewards/rewardEngine";
 import { getCampaignLevel } from "../registries/campaignLevels";
-import { getBotActionForLevel } from "../engine/ai/aiEngine";
 import { getBotThinkDelayMs } from "../constants/levels";
-import { RESERVED_CAPTURE_COLORS, PLAYER_CAPTURE_COLORS } from "../constants/theme";
+import { PLAYER_CAPTURE_COLORS } from "../constants/theme";
 import { createTurnState } from "./useTurnState";
 import { useGameTimer } from "./useGameTimer";
 import { useUndoHistory } from "./useUndoHistory";
@@ -95,6 +90,12 @@ export function useGameSession(options?: {
     player1: createInitialPlayerState(),
     player2: createInitialPlayerState(),
   });
+
+  // Territorial Block-Extrusion interactive selection & directional controls
+  const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null);
+  const [selectedDirection, setSelectedDirection] = useState<Direction | null>(null);
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+
   const [selectedPower, setSelectedPower] = useState<PowerId | null>(null);
   const [targetingMode, setTargetingMode] = useState(false);
   const [powerMessage, setPowerMessage] = useState<string | null>(null);
@@ -108,8 +109,6 @@ export function useGameSession(options?: {
   const playersRef = useRef(players);
   const botTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadedSessionKeyRef = useRef<string | null>(null);
-  const longPressLockRef = useRef<string | null>(null);
-  const freezeReleaseLockUntilRef = useRef(0);
   const winnerRef = useRef<Player | "draw" | null>(null);
   const currentTurnMovesRef = useRef<Coord[]>([]);
   const currentTurnMoveRecordsRef = useRef<TurnMoveRecord[]>([]);
@@ -140,7 +139,7 @@ export function useGameSession(options?: {
       setWinner(null);
       winnerRef.current = null;
       setGameStatus("playing");
-      const freshTurn = createTurnState(lvl.defaultTapsPerTurn);
+      const freshTurn = createTurnState(lvl.defaultTapsPerTurn ?? 2);
       setTurn(freshTurn);
       turnRef.current = freshTurn;
       const freshPlayers = {
@@ -149,6 +148,9 @@ export function useGameSession(options?: {
       };
       setPlayers(freshPlayers);
       playersRef.current = freshPlayers;
+      setSelectedBoxId(null);
+      setSelectedDirection(null);
+      setFeedbackMessage(null);
       setSelectedPower(null);
       setTargetingMode(false);
       setPowerMessage(null);
@@ -325,6 +327,8 @@ export function useGameSession(options?: {
       setLastPlayer2Moves([]);
     }
     setCurrentTurnMoves([]);
+    setSelectedBoxId(null);
+    setSelectedDirection(null);
     if (snap.winner === null) setGameStatus("playing");
   }, []);
 
@@ -337,11 +341,7 @@ export function useGameSession(options?: {
       if (winnerRef.current !== null) return true;
 
       const winState = checkWinCondition(nextBoard);
-      setScores((prev) =>
-        prev.player1 === winState.player1Score && prev.player2 === winState.player2Score
-          ? prev
-          : { player1: winState.player1Score, player2: winState.player2Score }
-      );
+      setScores({ player1: winState.player1Score, player2: winState.player2Score });
 
       let outcome = winState;
 
@@ -362,6 +362,7 @@ export function useGameSession(options?: {
         winnerRef.current = outcome.winner;
         setWinner(outcome.winner);
         setGameStatus("game_over");
+        playOutcomeSound(outcome.winner);
         const totalBoardPoints = getTotalBoardPoints(nextBoard);
         await saveMatch({
           winner: outcome.winner ?? "draw",
@@ -402,7 +403,6 @@ export function useGameSession(options?: {
   const handleWinCheckRef = useRef(handleWinCheck);
   handleWinCheckRef.current = handleWinCheck;
 
-  // Run stalemate / win check once after init or resume — not on every board/score update.
   useEffect(() => {
     if (initCheckToken === 0) return;
     const currentBoard = boardRef.current;
@@ -414,70 +414,195 @@ export function useGameSession(options?: {
     );
   }, [initCheckToken]);
 
+  // Turn advance helper: consumes 1 tap and updates or switches turns
+  const completeActionAndAdvance = useCallback(
+    async (
+      nextBoard: GameBoard,
+      player: Player,
+      actionCells: Coord[],
+      actionKind: "spawn" | "expand"
+    ) => {
+      boardRef.current = nextBoard;
+      setBoard(nextBoard);
+
+      const computed = computeScores(nextBoard);
+      setScores(computed);
+
+      // Record move coords for turn visual highlights
+      const moveRecord: TurnMoveRecord = {
+        row: actionCells[0]?.row ?? 0,
+        col: actionCells[0]?.col ?? 0,
+        tapCost: 1,
+        kind: "tap",
+      };
+      currentTurnMovesRef.current = [...currentTurnMovesRef.current, ...actionCells];
+      currentTurnMoveRecordsRef.current = [
+        ...currentTurnMoveRecordsRef.current,
+        moveRecord,
+      ];
+      setCurrentTurnMoves(currentTurnMovesRef.current);
+
+      const remaining = turnRef.current.tapsRemaining - 1;
+      let nextActive = activePlayerRef.current;
+      let nextTurn: TurnState;
+
+      if (remaining <= 0) {
+        nextActive = player === 1 ? 2 : 1;
+        const completedTurnMoves = resolveTurnHighlightCoords(
+          currentTurnMoveRecordsRef.current
+        );
+
+        if (player === 1) {
+          setLastPlayer1Moves(completedTurnMoves);
+          setLastPlayer2Moves([]);
+        } else {
+          setLastPlayer2Moves(completedTurnMoves);
+          setLastPlayer1Moves([]);
+        }
+
+        currentTurnMovesRef.current = [];
+        currentTurnMoveRecordsRef.current = [];
+        setCurrentTurnMoves([]);
+
+        nextTurn = createTurnState(turnRef.current.tapsPerTurn);
+        setActivePlayer(nextActive);
+        activePlayerRef.current = nextActive;
+        setTurn(nextTurn);
+        turnRef.current = nextTurn;
+        setSelectedBoxId(null);
+        setSelectedDirection(null);
+      } else {
+        nextTurn = {
+          ...turnRef.current,
+          tapsRemaining: remaining,
+          firstTapCoord: actionCells[0] ?? null,
+          normalTapUsedThisTurn: true,
+        };
+        setTurn(nextTurn);
+        turnRef.current = nextTurn;
+      }
+
+      const playerToCheck = remaining <= 0 ? nextActive : player;
+      const isOver = await handleWinCheck(nextBoard, playerToCheck, turnRef.current);
+      if (isOver) return false;
+
+      // In bot mode, if it's now Bot's turn, signal to schedule
+      return activeGameMode === "bot" && nextActive === 2;
+    },
+    [activeGameMode, handleWinCheck]
+  );
+
+  // Execute Expand Action for a block
+  const handleExpandBlock = useCallback(
+    async (boxId: string, direction: Direction): Promise<boolean> => {
+      if (gameStatus !== "playing" || isBotThinking || !boardRef.current) return false;
+      const player = activePlayerRef.current;
+      if (activeGameMode === "bot" && player !== 1) return false;
+
+      const currentBoard = boardRef.current;
+      if (!canExpandBlock(currentBoard, boxId, direction, player)) {
+        playGameSound("invalid");
+        setFeedbackMessage("Cannot expand: direction is blocked or out of bounds!");
+        return false;
+      }
+
+      pushSnapshot(makeSnapshot());
+      const result = executeExpandBlock(currentBoard, boxId, direction, player);
+      if (!result.success) {
+        playGameSound("invalid");
+        return false;
+      }
+
+      playGameSound("capture");
+      setFeedbackMessage(null);
+
+      const shouldBotPlay = await completeActionAndAdvance(
+        result.board,
+        player,
+        result.addedCells,
+        "expand"
+      );
+
+      if (shouldBotPlay && gameStatus === "playing") {
+        scheduleBotTurn();
+      }
+
+      return true;
+    },
+    [gameStatus, isBotThinking, activeGameMode, makeSnapshot, pushSnapshot, completeActionAndAdvance]
+  );
+
+  // Bot Turn Scheduler
   const scheduleBotTurn = useCallback(() => {
-      if (activeGameMode !== "bot") return;
+    if (activeGameMode !== "bot") return;
 
-      const thinkDelayMs = getBotThinkDelayMs(level.botDifficulty);
-      setIsBotThinking(true);
-      if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+    const thinkDelayMs = getBotThinkDelayMs(level.botDifficulty);
+    setIsBotThinking(true);
+    if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
 
-      botTimeoutRef.current = setTimeout(async () => {
-        let keepThinking = false;
-        try {
-          if (activePlayerRef.current !== 2 || winnerRef.current !== null) {
-            return;
-          }
+    botTimeoutRef.current = setTimeout(async () => {
+      let keepThinking = false;
+      try {
+        if (activePlayerRef.current !== 2 || winnerRef.current !== null) {
+          return;
+        }
 
-          const turn = turnRef.current;
-          const action = getBotActionForLevel(
-            level.botDifficulty,
-            boardRef.current!,
-            2,
-            turn.tapsRemaining,
-            turn.tapsPerTurn,
-            turn.firstTapBoxId,
-            turn.dangerTapCount,
-            turn.dangerTerritoryLinked,
-            turn.normalTapUsedThisTurn
-          );
-          if (action) {
-            const shouldContinue =
-              action.type === "freeze"
-                ? await executeFreezeInternal(action.row, action.col, 2)
-                : await executeMoveInternal(action.row, action.col, 2);
-            if (shouldContinue) {
-              keepThinking = true;
-              scheduleBotTurn();
-            } else if (
-              activePlayerRef.current === 2 &&
-              turnRef.current.tapsRemaining > 0
-            ) {
-              keepThinking = true;
-              scheduleBotTurn();
+        const currentBoard = boardRef.current;
+        if (!currentBoard) return;
+
+        const action = getBotActionForLevel(
+          level.botDifficulty,
+          currentBoard,
+          2,
+          turnRef.current.tapsRemaining
+        );
+
+        if (action) {
+          if (action.type === "expand" && action.boxId && action.direction) {
+            const result = executeExpandBlock(currentBoard, action.boxId, action.direction, 2);
+            if (result.success) {
+              playGameSound("capture");
+              const shouldContinue = await completeActionAndAdvance(
+                result.board,
+                2,
+                result.addedCells,
+                "expand"
+              );
+              if (shouldContinue && activePlayerRef.current === 2 && turnRef.current.tapsRemaining > 0) {
+                keepThinking = true;
+                scheduleBotTurn();
+              }
             }
           } else {
-            const blocked = await handleWinCheck(
-              boardRef.current!,
-              2,
-              turnRef.current
-            );
-            if (!blocked) {
-              setActivePlayer(1);
-              activePlayerRef.current = 1;
-              const freshTurn = createTurnState(level.defaultTapsPerTurn);
-              setTurn(freshTurn);
-              turnRef.current = freshTurn;
+            // Spawn action
+            const row = action.type === "spawn" ? action.row : (action as any).row;
+            const col = action.type === "spawn" ? action.col : (action as any).col;
+            const result = executeSpawnBlock(currentBoard, row, col, 2);
+            if (result.success) {
+              playGameSound("tap");
+              const shouldContinue = await completeActionAndAdvance(
+                result.board,
+                2,
+                [{ row, col }],
+                "spawn"
+              );
+              if (shouldContinue && activePlayerRef.current === 2 && turnRef.current.tapsRemaining > 0) {
+                keepThinking = true;
+                scheduleBotTurn();
+              }
             }
           }
-        } catch (e) {
-          console.error("Bot failed:", e);
-        } finally {
-          if (!keepThinking) setIsBotThinking(false);
+        } else {
+          // No legal move for bot: check win or pass
+          await handleWinCheck(currentBoard, 2, turnRef.current);
         }
-      }, thinkDelayMs);
-    },
-    [activeGameMode, level.botDifficulty, level.defaultTapsPerTurn, handleWinCheck]
-  );
+      } catch (e) {
+        console.error("Bot turn error:", e);
+      } finally {
+        if (!keepThinking) setIsBotThinking(false);
+      }
+    }, thinkDelayMs);
+  }, [activeGameMode, level.botDifficulty, completeActionAndAdvance, handleWinCheck]);
 
   useEffect(() => {
     if (configLoading || !board || activeGameMode !== "bot") return;
@@ -502,419 +627,105 @@ export function useGameSession(options?: {
     scheduleBotTurn,
   ]);
 
-  const executeMoveInternal = async (
-    row: number,
-    col: number,
-    player: Player
-  ): Promise<boolean> => {
-    const currentBoard = boardRef.current;
-    if (!currentBoard) return false;
-
-    const tappedBox = getBoxAt(currentBoard, row, col);
-    if (!isValidTapAction(currentBoard, row, col, player, turnRef.current)) {
-      return false;
-    }
-
-    const tapCost = tappedBox ? getTapCostForBox(tappedBox, player) : 1;
-
-    const result = executeTap(currentBoard, row, col, player);
-    if (result.board === currentBoard) return false;
-
-    const didCapture =
-      result.capturedBoxIds.length > 0 || result.opponentCapturedBoxIds.length > 0;
-    playMoveSounds(didCapture);
-
-    const prunePlayerMoves = (
-      setMoves: React.Dispatch<React.SetStateAction<Coord[]>>,
-      boardState: GameBoard,
-      excludeBoxIds: Set<string>
-    ) => {
-      setMoves((prev) =>
-        prev.filter((m) => {
-          const id = boardState.cellMap[m.row]?.[m.col];
-          return id && !excludeBoxIds.has(id);
-        })
-      );
-    };
-
-    // Add to current turn's taps
-    const moveRecord: TurnMoveRecord = { row, col, tapCost, kind: "tap" };
-    currentTurnMovesRef.current = [...currentTurnMovesRef.current, { row, col }];
-    currentTurnMoveRecordsRef.current = [
-      ...currentTurnMoveRecordsRef.current,
-      moveRecord,
-    ];
-    setCurrentTurnMoves(currentTurnMovesRef.current);
-
-    if (tappedBox) {
-      const opponentMovesSetter = player === 1 ? setLastPlayer2Moves : setLastPlayer1Moves;
-      prunePlayerMoves(opponentMovesSetter, currentBoard, new Set([tappedBox.id]));
-    }
-
-    let nextPlayers = { ...playersRef.current };
-    if (result.capturedBoxIds.length > 0) {
-      const key = player === 1 ? "player1" : "player2";
-      nextPlayers = {
-        ...nextPlayers,
-        [key]: applyCaptureRewards(
-          nextPlayers[key],
-          result.rewards,
-          result.powerGrants
-        ),
-      };
-    }
-    if (result.opponentCapturedBoxIds.length > 0) {
-      const opponentKey = player === 1 ? "player2" : "player1";
-      nextPlayers = {
-        ...nextPlayers,
-        [opponentKey]: applyCaptureRewards(
-          nextPlayers[opponentKey],
-          result.opponentRewards,
-          result.opponentPowerGrants
-        ),
-      };
-    }
-    if (
-      result.capturedBoxIds.length > 0 ||
-      result.opponentCapturedBoxIds.length > 0
-    ) {
-      setPlayers(nextPlayers);
-      playersRef.current = nextPlayers;
-    }
-
-    boardRef.current = result.board;
-    setBoard(result.board);
-
-    let nextActive = activePlayerRef.current;
-    const remaining = turnRef.current.tapsRemaining - tapCost;
-
-    let dangerTapCount = turnRef.current.dangerTapCount;
-    let dangerTerritoryLinked = turnRef.current.dangerTerritoryLinked;
-    if (tappedBox && isDangerPlot(tappedBox)) {
-      dangerTapCount += 1;
-      if (isAdjacentToPlayerTerritory(currentBoard, tappedBox.id, player)) {
-        dangerTerritoryLinked = true;
-      }
-    }
-
-    let nextTurn: TurnState;
-
-    if (remaining <= 0) {
-      nextActive = player === 1 ? 2 : 1;
-
-      // Finalize last moves at the end of the turn
-      const completedTurnMoves = resolveTurnHighlightCoords(
-        currentTurnMoveRecordsRef.current
-      );
-      if (activeGameMode === "pvp") {
-        if (player === 1) {
-          setLastPlayer1Moves(completedTurnMoves);
-          setLastPlayer2Moves([]);
-        } else {
-          setLastPlayer2Moves(completedTurnMoves);
-          setLastPlayer1Moves([]);
-        }
-      } else {
-        // Bot mode
-        if (player === 1) {
-          setLastPlayer1Moves(completedTurnMoves);
-          setLastPlayer2Moves([]);
-        } else {
-          setLastPlayer2Moves(completedTurnMoves);
-          setLastPlayer1Moves([]);
-        }
-      }
-      currentTurnMovesRef.current = [];
-      currentTurnMoveRecordsRef.current = [];
-      setCurrentTurnMoves([]);
-
-      nextTurn = createTurnState(turnRef.current.tapsPerTurn);
-      setActivePlayer(nextActive);
-      activePlayerRef.current = nextActive;
-      setTurn(nextTurn);
-      turnRef.current = nextTurn;
-    } else {
-      const boxId = tappedBox?.id ?? null;
-      nextTurn = {
-        ...turnRef.current,
-        tapsRemaining: remaining,
-        firstTapCoord: { row, col },
-        firstTapBoxId: boxId,
-        dangerTapCount,
-        dangerTerritoryLinked,
-        normalTapUsedThisTurn: true,
-      };
-      setTurn(nextTurn);
-      turnRef.current = nextTurn;
-    }
-
-    const playerToCheck = remaining <= 0 ? nextActive : player;
-    // End game if the active player has taps left but no legal follow-up (e.g. after 1st of 2 taps).
-    const isOver = await handleWinCheck(result.board, playerToCheck, turnRef.current);
-    if (isOver) return false;
-
-    if (activeGameMode === "bot" && nextActive === 2) {
-      if (turnRef.current.tapsRemaining === turnRef.current.tapsPerTurn) {
-        setLastPlayer2Moves([]);
-        pushSnapshot(makeSnapshot());
-      }
-      return true;
-    }
-
-    return false;
-  };
-
-  const executeFreezeInternal = async (
-    row: number,
-    col: number,
-    player: Player
-  ): Promise<boolean> => {
-    const currentBoard = boardRef.current;
-    if (!currentBoard) return false;
-
-    if (!isValidFreezeTarget(currentBoard, row, col, player, turnRef.current)) {
-      return false;
-    }
-
-    const tappedBox = getBoxAt(currentBoard, row, col);
-    const result = executeFreeze(currentBoard, row, col, player);
-    if (result.board === currentBoard) return false;
-
-    playGameSound("tap");
-    const moveRecord: TurnMoveRecord = {
-      row,
-      col,
-      tapCost: FREEZE_TAP_COST,
-      kind: "freeze",
-    };
-    currentTurnMovesRef.current = [...currentTurnMovesRef.current, { row, col }];
-    currentTurnMoveRecordsRef.current = [
-      ...currentTurnMoveRecordsRef.current,
-      moveRecord,
-    ];
-    setCurrentTurnMoves(currentTurnMovesRef.current);
-
-    if (tappedBox) {
-      const opponentMovesSetter = player === 1 ? setLastPlayer2Moves : setLastPlayer1Moves;
-      setMovesPrune(opponentMovesSetter, currentBoard, new Set([tappedBox.id]));
-    }
-
-    boardRef.current = result.board;
-    setBoard(result.board);
-
-    const nextActive = player === 1 ? 2 : 1;
-    const completedTurnMoves = resolveTurnHighlightCoords(
-      currentTurnMoveRecordsRef.current
-    );
-
-    if (activeGameMode === "pvp") {
-      if (player === 1) {
-        setLastPlayer1Moves(completedTurnMoves);
-        setLastPlayer2Moves([]);
-      } else {
-        setLastPlayer2Moves(completedTurnMoves);
-        setLastPlayer1Moves([]);
-      }
-    } else if (player === 1) {
-      setLastPlayer1Moves(completedTurnMoves);
-      setLastPlayer2Moves([]);
-    } else {
-      setLastPlayer2Moves(completedTurnMoves);
-      setLastPlayer1Moves([]);
-    }
-    currentTurnMovesRef.current = [];
-    currentTurnMoveRecordsRef.current = [];
-    setCurrentTurnMoves([]);
-
-    const nextTurn = createTurnState(turnRef.current.tapsPerTurn);
-    setActivePlayer(nextActive);
-    activePlayerRef.current = nextActive;
-    setTurn(nextTurn);
-    turnRef.current = nextTurn;
-    setPowerMessage(null);
-
-    const isOver = await handleWinCheck(result.board, nextActive, nextTurn);
-    if (isOver) return false;
-
-    if (activeGameMode === "bot" && nextActive === 2) {
-      setLastPlayer2Moves([]);
-      pushSnapshot(makeSnapshot());
-      scheduleBotTurn();
-      return true;
-    }
-
-    return false;
-  };
-
-  function setMovesPrune(
-    setMoves: React.Dispatch<React.SetStateAction<Coord[]>>,
-    boardState: GameBoard,
-    excludeBoxIds: Set<string>
-  ) {
-    setMoves((prev) =>
-      prev.filter((m) => {
-        const id = boardState.cellMap[m.row]?.[m.col];
-        return id && !excludeBoxIds.has(id);
-      })
-    );
-  }
-
-  const handleTileLongPress = async (row: number, col: number) => {
-    if (gameStatus !== "playing" || isBotThinking || !boardRef.current) return;
-    if (activeGameMode === "bot" && activePlayerRef.current !== 1) return;
-    if (targetingMode && selectedPower) return;
-
-    const player = activePlayerRef.current;
-    const tappedBox = getBoxAt(boardRef.current, row, col);
-
-    if (!isValidFreezeTarget(boardRef.current, row, col, player, turnRef.current)) {
-      playGameSound("invalid");
-      return;
-    }
-
-    if (tappedBox) {
-      longPressLockRef.current = tappedBox.id;
-    }
-    freezeReleaseLockUntilRef.current = Date.now() + 700;
-
-    const currentTurn = turnRef.current;
-    if (activeGameMode === "pvp") {
-      pushSnapshot(makeSnapshot());
-    } else if (player === 1 && currentTurn.tapsRemaining === currentTurn.tapsPerTurn) {
-      pushSnapshot(makeSnapshot());
-    }
-
-    await executeFreezeInternal(row, col, player);
-
-    setTimeout(() => {
-      longPressLockRef.current = null;
-    }, 700);
-  };
-
+  // Main tile tap handler
   const handleTileTap = async (row: number, col: number) => {
     if (gameStatus !== "playing" || isBotThinking || !boardRef.current) return;
-    if (activeGameMode === "bot" && activePlayerRef.current !== 1) return;
-    if (Date.now() < freezeReleaseLockUntilRef.current) return;
+    const player = activePlayerRef.current;
+    if (activeGameMode === "bot" && player !== 1) return;
 
-    if (targetingMode && selectedPower) {
-      await handlePowerTarget(row, col);
-      return;
-    }
+    const currentBoard = boardRef.current;
+    const boxId = currentBoard.cellMap[row]?.[col];
 
-    const currentTurn = turnRef.current;
-    const tappedBox = getBoxAt(boardRef.current, row, col);
+    // Case 1: Tapping an empty cell -> SPAWN 1x1 block
+    if (!boxId) {
+      if (!canPlayerSpawnAt(currentBoard, row, col, player)) {
+        playGameSound("invalid");
+        setFeedbackMessage("Cannot spawn in opponent's territory! Spawn in your territory or neutral zone.");
+        return;
+      }
 
-    if (tappedBox && longPressLockRef.current === tappedBox.id) {
-      return;
-    }
-
-    if (!isValidTapAction(boardRef.current, row, col, activePlayerRef.current, currentTurn)) {
-      playGameSound("invalid");
-      return;
-    }
-
-    if (activeGameMode === "pvp") {
       pushSnapshot(makeSnapshot());
-    } else if (
-      activePlayerRef.current === 1 &&
-      currentTurn.tapsRemaining === currentTurn.tapsPerTurn
-    ) {
-      pushSnapshot(makeSnapshot());
-    }
+      const result = executeSpawnBlock(currentBoard, row, col, player);
+      if (!result.success) {
+        playGameSound("invalid");
+        return;
+      }
 
-    const shouldBotPlay = await executeMoveInternal(
-      row,
-      col,
-      activePlayerRef.current
-    );
+      playGameSound("tap");
+      setFeedbackMessage(null);
+      setSelectedBoxId(null);
+      setSelectedDirection(null);
 
-    if (activeGameMode === "bot" && shouldBotPlay && gameStatus === "playing") {
-      scheduleBotTurn();
-    }
-  };
+      const shouldBotPlay = await completeActionAndAdvance(
+        result.board,
+        player,
+        [{ row, col }],
+        "spawn"
+      );
 
-  const handlePowerTarget = async (row: number, col: number) => {
-    if (!selectedPower) return;
-    const def = getPowerDefinition(selectedPower);
-    if (!def || def.targeting !== "box") return;
-
-    const playerKey = activePlayer === 1 ? "player1" : "player2";
-    if (players[playerKey].powers[selectedPower] <= 0) return;
-
-    if (!boardRef.current) return;
-
-    const result = executePower(selectedPower, {
-      board: boardRef.current,
-      player: activePlayer,
-      target: { row, col },
-      tapsPerTurn: turn.tapsPerTurn,
-    });
-
-    if (!result) return;
-
-    boardRef.current = result.board;
-    setBoard(result.board);
-    setPowerMessage(result.message ?? null);
-
-    setPlayers((prev) => ({
-      ...prev,
-      [playerKey]: {
-        ...prev[playerKey],
-        powers: {
-          ...prev[playerKey].powers,
-          [selectedPower]: prev[playerKey].powers[selectedPower] - 1,
-        },
-      },
-    }));
-
-    setSelectedPower(null);
-    setTargetingMode(false);
-    await handleWinCheck(result.board, activePlayerRef.current, turnRef.current);
-  };
-
-  const activatePower = (powerId: PowerId) => {
-    if (gameStatus !== "playing" || isBotThinking) return;
-    if (activeGameMode === "bot" && activePlayer !== 1) return;
-
-    const playerKey = activePlayer === 1 ? "player1" : "player2";
-    if (players[playerKey].powers[powerId] <= 0) return;
-
-    const def = getPowerDefinition(powerId);
-    if (!def) return;
-
-    if (def.targeting === "none") {
-      if (powerId === "extra_tap") {
-        setTurn((prev) => ({
-          ...prev,
-          tapsPerTurn: prev.tapsPerTurn + 1,
-          tapsRemaining: prev.tapsRemaining + 1,
-          extraTapActive: true,
-        }));
-        setPlayers((prev) => ({
-          ...prev,
-          [playerKey]: {
-            ...prev[playerKey],
-            powers: {
-              ...prev[playerKey].powers,
-              extra_tap: prev[playerKey].powers.extra_tap - 1,
-            },
-          },
-        }));
-        setPowerMessage("Extra tap activated! +1 click this turn.");
+      if (shouldBotPlay && gameStatus === "playing") {
+        scheduleBotTurn();
       }
       return;
     }
 
-    setSelectedPower(powerId);
-    setTargetingMode(true);
-    setPowerMessage(`Select a target for ${def.name}`);
+    // Case 2: Tapping an occupied cell
+    const box = currentBoard.boxes[boxId];
+    if (!box) return;
+
+    // Subcase 2A: Tapping opponent's block
+    if (box.owner !== player) {
+      playGameSound("invalid");
+      setFeedbackMessage("Opponent's block! Cannot be selected or grown.");
+      return;
+    }
+
+    // Subcase 2B: Tapping owned block
+    // If a direction was already chosen (Choose Direction -> Select Block mode):
+    if (selectedDirection !== null) {
+      if (!canExpandBlock(currentBoard, boxId, selectedDirection, player)) {
+        playGameSound("invalid");
+        setFeedbackMessage(`Cannot expand ${selectedDirection.toUpperCase()}: path is blocked!`);
+        setSelectedBoxId(boxId); // Select it so player sees valid arrows
+        return;
+      }
+
+      pushSnapshot(makeSnapshot());
+      const result = executeExpandBlock(currentBoard, boxId, selectedDirection, player);
+      if (!result.success) {
+        playGameSound("invalid");
+        return;
+      }
+
+      playGameSound("capture");
+      setFeedbackMessage(null);
+      setSelectedBoxId(boxId);
+
+      const shouldBotPlay = await completeActionAndAdvance(
+        result.board,
+        player,
+        result.addedCells,
+        "expand"
+      );
+
+      if (shouldBotPlay && gameStatus === "playing") {
+        scheduleBotTurn();
+      }
+      return;
+    }
+
+    // Otherwise, toggle selection of this block (Select Block -> Choose Direction mode)
+    playGameSound("tap");
+    setFeedbackMessage(null);
+    setSelectedBoxId((prev) => (prev === boxId ? null : boxId));
   };
 
-  const cancelPowerTargeting = () => {
-    setSelectedPower(null);
-    setTargetingMode(false);
-    setPowerMessage(null);
+  const handleTileLongPress = (_row: number, _col: number) => {
+    // Preserved for interface compatibility
   };
+
+  const activatePower = (_powerId: PowerId) => {};
+  const cancelPowerTargeting = () => {};
 
   const handleUndo = () => {
     if (!canUndo || isBotThinking) return;
@@ -947,6 +758,12 @@ export function useGameSession(options?: {
     gameMode: activeGameMode,
     turn,
     players,
+    selectedBoxId,
+    setSelectedBoxId,
+    selectedDirection,
+    setSelectedDirection,
+    feedbackMessage,
+    handleExpandBlock,
     selectedPower,
     targetingMode,
     powerMessage,
