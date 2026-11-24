@@ -5,8 +5,7 @@ name: Build Android Debug APK
 #   push:
 #     branches:
 #       - main
-#       - dev
-#       - tutorial-test
+#       
 
 jobs:
   build:
